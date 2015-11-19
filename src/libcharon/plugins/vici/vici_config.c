@@ -2,6 +2,7 @@
  * Copyright (C) 2014 Martin Willi
  * Copyright (C) 2014 revosec AG
  *
+ * Copyright (C) 2015 Tobias Brunner
  * Copyright (C) 2015 Andreas Steffen
  * HSR Hochschule fuer Technik Rapperswil
  *
@@ -218,6 +219,25 @@ typedef struct {
 } request_data_t;
 
 /**
+ * Auth config data
+ */
+typedef struct {
+	char *name;
+	request_data_t *request;
+	auth_cfg_t *cfg;
+} auth_data_t;
+
+/**
+ * Clean up auth config data
+ */
+static void free_auth_data(auth_data_t *data)
+{
+	DESTROY_IF(data->cfg);
+	free(data->name);
+	free(data);
+}
+
+/**
  * Data associated to a peer config
  */
 typedef struct {
@@ -311,7 +331,7 @@ static void log_auth(auth_cfg_t *auth)
 static void log_peer_data(peer_data_t *data)
 {
 	enumerator_t *enumerator;
-	auth_cfg_t *auth;
+	auth_data_t *auth;
 	host_t *host;
 
 	DBG2(DBG_CFG, "  version = %u", data->version);
@@ -350,7 +370,7 @@ static void log_peer_data(peer_data_t *data)
 	while (enumerator->enumerate(enumerator, &auth))
 	{
 		DBG2(DBG_CFG, "  local:");
-		log_auth(auth);
+		log_auth(auth->cfg);
 	}
 	enumerator->destroy(enumerator);
 
@@ -358,7 +378,7 @@ static void log_peer_data(peer_data_t *data)
 	while (enumerator->enumerate(enumerator, &auth))
 	{
 		DBG2(DBG_CFG, "  remote:");
-		log_auth(auth);
+		log_auth(auth->cfg);
 	}
 	enumerator->destroy(enumerator);
 }
@@ -368,10 +388,8 @@ static void log_peer_data(peer_data_t *data)
  */
 static void free_peer_data(peer_data_t *data)
 {
-	data->local->destroy_offset(data->local,
-									offsetof(auth_cfg_t, destroy));
-	data->remote->destroy_offset(data->remote,
-									offsetof(auth_cfg_t, destroy));
+	data->local->destroy_function(data->local, (void*)free_auth_data);
+	data->remote->destroy_function(data->remote, (void*)free_auth_data);
 	data->children->destroy_offset(data->children,
 									offsetof(child_cfg_t, destroy));
 	data->proposals->destroy_offset(data->proposals,
@@ -459,14 +477,6 @@ static void free_child_data(child_data_t *data)
 									offsetof(traffic_selector_t, destroy));
 	free(data->updown);
 }
-
-/**
- * Auth config data
- */
-typedef struct {
-	request_data_t *request;
-	auth_cfg_t *cfg;
-} auth_data_t;
 
 /**
  * Common proposal parsing
@@ -1502,40 +1512,48 @@ CALLBACK(peer_sn, bool,
 	if (strcasepfx(name, "local") ||
 		strcasepfx(name, "remote"))
 	{
-		auth_data_t auth = {
+		enumerator_t *enumerator;
+		linked_list_t *auths;
+		auth_data_t *auth, *current;
+
+		INIT(auth,
+			.name = strdup(name),
 			.request = peer->request,
 			.cfg = auth_cfg_create(),
-		};
+		);
 
-		if (!message->parse(message, ctx, NULL, auth_kv, auth_li, &auth))
+		if (!message->parse(message, ctx, NULL, auth_kv, auth_li, auth))
 		{
-			auth.cfg->destroy(auth.cfg);
+			free_auth_data(auth);
 			return FALSE;
 		}
 
-		if (!auth.cfg->get(auth.cfg, AUTH_RULE_IDENTITY))
+		if (!auth->cfg->get(auth->cfg, AUTH_RULE_IDENTITY))
 		{
 			identification_t *id;
 			certificate_t *cert;
 
-			cert = auth.cfg->get(auth.cfg, AUTH_RULE_SUBJECT_CERT);
+			cert = auth->cfg->get(auth->cfg, AUTH_RULE_SUBJECT_CERT);
 			if (cert)
 			{
 				id = cert->get_subject(cert);
 				DBG1(DBG_CFG, "  id not specified, defaulting to cert id '%Y'",
 					 id);
-				auth.cfg->add(auth.cfg, AUTH_RULE_IDENTITY, id->clone(id));
+				auth->cfg->add(auth->cfg, AUTH_RULE_IDENTITY, id->clone(id));
 			}
 		}
 
-		if (strcasepfx(name, "local"))
+		auths = strcasepfx(name, "local") ? peer->local : peer->remote;
+		enumerator = auths->create_enumerator(auths);
+		while (enumerator->enumerate(enumerator, &current))
 		{
-			peer->local->insert_last(peer->local, auth.cfg);
+			if (strcmp(auth->name, current->name) < 0)
+			{
+				break;
+			}
 		}
-		else
-		{
-			peer->remote->insert_last(peer->remote, auth.cfg);
-		}
+		auths->insert_before(auths, enumerator, auth);
+		enumerator->destroy(enumerator);
 		return TRUE;
 	}
 	peer->request->reply = create_reply("invalid section: %s", name);
@@ -1828,7 +1846,7 @@ CALLBACK(config_sn, bool,
 	peer_cfg_t *peer_cfg;
 	ike_cfg_t *ike_cfg;
 	child_cfg_t *child_cfg;
-	auth_cfg_t *auth_cfg;
+	auth_data_t *auth;
 	proposal_t *proposal;
 	host_t *host;
 	char *str;
@@ -1849,8 +1867,10 @@ CALLBACK(config_sn, bool,
 	}
 	if (peer.remote->get_count(peer.remote) == 0)
 	{
-		auth_cfg = auth_cfg_create();
-		peer.remote->insert_last(peer.remote, auth_cfg);
+		INIT(auth,
+			.cfg = auth_cfg_create(),
+		);
+		peer.remote->insert_last(peer.remote, auth);
 	}
 	if (peer.proposals->get_count(peer.proposals) == 0)
 	{
@@ -1926,14 +1946,18 @@ CALLBACK(config_sn, bool,
 						FALSE, NULL, NULL);
 
 	while (peer.local->remove_first(peer.local,
-									(void**)&auth_cfg) == SUCCESS)
+									(void**)&auth) == SUCCESS)
 	{
-		peer_cfg->add_auth_cfg(peer_cfg, auth_cfg, TRUE);
+		peer_cfg->add_auth_cfg(peer_cfg, auth->cfg, TRUE);
+		auth->cfg = NULL;
+		free_auth_data(auth);
 	}
 	while (peer.remote->remove_first(peer.remote,
-									 (void**)&auth_cfg) == SUCCESS)
+									 (void**)&auth) == SUCCESS)
 	{
-		peer_cfg->add_auth_cfg(peer_cfg, auth_cfg, FALSE);
+		peer_cfg->add_auth_cfg(peer_cfg, auth->cfg, FALSE);
+		auth->cfg = NULL;
+		free_auth_data(auth);
 	}
 	while (peer.children->remove_first(peer.children,
 									   (void**)&child_cfg) == SUCCESS)
