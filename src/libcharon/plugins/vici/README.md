@@ -609,8 +609,10 @@ command.
 			version = <IKE version, 1 or 2>
 			state = <IKE_SA state name>
 			local-host = <local IKE endpoint address>
+			local-port = <local IKE endpoint port>
 			local-id = <local IKE identity>
 			remote-host = <remote IKE endpoint address>
+			remote-port = <remote IKE endpoint port>
 			remote-id = <remote IKE identity>
 			remote-xauth-id = <remote XAuth identity, if XAuth-authenticated>
 			remote-eap-id = <remote EAP identity, if EAP-authenticated>
@@ -1102,8 +1104,8 @@ subdirectory, and gets built and installed if strongSwan has been
  _./configure_'d with_--enable-vici_ and _--enable-perl-cpan_.
 
 The _Vici::Session_ module provides a _new()_ constructor for a high level
-interface, the underlying _Vici::Packet_ and _Vici::Transport_ classes are 
-usually not required to build Perl applications using VICI. The _Vici::Session_ 
+interface, the underlying _Vici::Packet_ and _Vici::Transport_ classes are
+usually not required to build Perl applications using VICI. The _Vici::Session_
 class provides methods for the supported VICI commands. The auxiliare
  _Vici::Message_ class is used to encode configuration parameters sent to
 the daemon and decode data returned by the daemon.
